@@ -18,6 +18,7 @@ import UserHeader from './UserHeader';
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Open Source Village',
   '/calendar': 'Calendar',
+  '/map': 'Map',
   '/offers': 'Offers',
   '/needs': 'Needs',
   '/offers/create': 'Propose Workshop',
@@ -86,6 +87,7 @@ function TopBarContent() {
   const menuItems = [
     { href: '/', label: 'Home' },
     { href: '/calendar', label: 'Calendar' },
+    { href: '/map', label: 'Map & Directions' },
     { href: '/book', label: 'Book a Room' },
     { href: '/offers', label: 'Offers' },
     { href: '/needs', label: 'Needs' },
