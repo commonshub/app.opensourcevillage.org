@@ -7,10 +7,11 @@ import TopBar from "@/components/TopBar";
 import Footer from "@/components/Footer";
 import FloatingActionMenu from "@/components/FloatingActionMenu";
 import { getRelayUrls, getServerNpub } from "@/lib/nostr-server";
+import { EVENT } from "@/lib/event";
 
 export const metadata: Metadata = {
   title: "Open Source Village",
-  description: "Mobile webapp for Open Source Village event attendees",
+  description: `Mobile webapp for ${EVENT.name} attendees, ${EVENT.datesLabel}`,
 };
 
 export const viewport: Viewport = {

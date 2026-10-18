@@ -9,6 +9,7 @@ import { useRouter } from 'next/navigation';
 import { getStoredCredentials } from '@/lib/nostr';
 import WelcomeActions from '@/components/WelcomeActions';
 import NostrFeed from '@/components/NostrFeed';
+import { EVENT } from '@/lib/event';
 
 export default function Home() {
   const router = useRouter();
@@ -87,7 +88,7 @@ export default function Home() {
 
         <div className="text-center">
           <p className="text-xs text-gray-500">
-            Jan 26 - Feb 6, 2026
+            {EVENT.datesLabel}
           </p>
         </div>
       </div>

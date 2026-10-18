@@ -9,6 +9,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getStoredCredentials, clearCredentials } from '@/lib/nostr';
 import { getStoredSecretKey } from '@/lib/nostr-events';
+import { EVENT } from '@/lib/event';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -399,8 +400,8 @@ export default function SettingsPage() {
 
           <div className="space-y-3">
             <div>
-              <p className="font-medium text-gray-900">Open Source Village 2026</p>
-              <p className="text-sm text-gray-600">Jan 26 - Feb 6, 2026</p>
+              <p className="font-medium text-gray-900">{EVENT.name}</p>
+              <p className="text-sm text-gray-600">{EVENT.datesLabel}</p>
             </div>
 
             <div className="flex gap-3">
