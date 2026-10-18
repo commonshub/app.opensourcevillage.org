@@ -272,6 +272,7 @@ function VenueCard({
           <span className="block font-semibold text-gray-900">{venue.name}</span>
           <span className="block text-sm text-gray-600">{venue.role}</span>
           <span className="block text-xs text-gray-500 mt-0.5">{venue.address}</span>
+          {venue.note && <span className="block text-xs text-gray-600 mt-1">{venue.note}</span>}
           {meters !== null && (
             <span className="block text-xs text-gray-700 mt-1">
               {formatDistance(meters)} away · about {walkingMinutes(meters)} min on foot

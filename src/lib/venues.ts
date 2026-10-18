@@ -19,6 +19,8 @@ export interface Venue {
   lon: number;
   url?: string;
   osmUrl?: string;
+  /** Practical tip shown on the card, e.g. how to find the entrance */
+  note?: string;
 }
 
 export interface Coordinates {
