@@ -4,13 +4,15 @@
  *
  * Routes come from Transitous, which knows STIB's timetable; this adds
  * STIB's own real-time "next 71 in 3 min" at the stop where a route
- * boards a STIB line. The open data API needs a free key (STIB_API_KEY);
- * without it the feature stays off.
+ * boards a STIB line. Fetching lives in stib-live.ts (server only).
  *
  * The dataset has been published in two shapes over the years (camelCase
  * `points`/`passingTimes`, and lowercase Opendatasoft records); both are
  * read. Anything unrecognised yields no departures rather than an error.
  */
+
+/** Attribution STIB-MIVB's terms of use ask for */
+export const STIB_ATTRIBUTION = 'STIB-MIVB – Open Data';
 
 export interface StibDeparture {
   line: string;

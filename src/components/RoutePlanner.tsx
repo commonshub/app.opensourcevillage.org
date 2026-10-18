@@ -9,7 +9,6 @@
  *   their colours and real-time delays
  * - The chosen route is reported to the parent to draw on the map
  * - STIB-MIVB legs show STIB's own live waiting times at the boarding stop
- *   (when the server has a STIB_API_KEY)
  * - Offline, the service worker serves the last routes fetched (up to 12 h)
  */
 
@@ -17,7 +16,7 @@ import { useEffect, useMemo, useState } from 'react';
 import settings from '../../settings.json';
 import type { Coordinates, Venue } from '@/lib/venues';
 import { leaveLabel, minutesUntil, type RouteLeg, type TransitRoute } from '@/lib/transit';
-import { isStibAgency, stibStopId, type StibDeparture } from '@/lib/stib';
+import { isStibAgency, stibStopId, STIB_ATTRIBUTION, type StibDeparture } from '@/lib/stib';
 
 interface DirectionsResponse {
   routes: TransitRoute[];
@@ -101,6 +100,7 @@ const STIB_REFRESH = 30000;
 function StibLive({ leg, now }: { leg: RouteLeg; now: number }) {
   const stop = isStibAgency(leg.agency) ? stibStopId(leg.fromStopId) : null;
   const [departures, setDepartures] = useState<StibDeparture[] | null>(null);
+  const [stale, setStale] = useState(false);
 
   useEffect(() => {
     if (!stop || !leg.line) return;
@@ -110,13 +110,15 @@ function StibLive({ leg, now }: { leg: RouteLeg; now: number }) {
       try {
         const res = await fetch(`/api/stib/departures?${params}`);
         if (!res.ok) {
-          // Not configured: stop asking; offline or errors: try again later
+          // Turned off: stop asking; busy, offline or errors: try again later
           const body = await res.json().catch(() => ({}));
           if (body.disabled) stopped = true;
           setDepartures(null);
           return;
         }
-        setDepartures((await res.json()).departures);
+        const body = await res.json();
+        setDepartures(body.departures);
+        setStale(!!body.stale);
       } catch {
         setDepartures(null);
       }
@@ -133,13 +135,17 @@ function StibLive({ leg, now }: { leg: RouteLeg; now: number }) {
 
   return (
     <p className="text-xs text-gray-700 mt-0.5 flex items-center gap-1.5">
-      <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" aria-hidden />
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${stale ? 'bg-gray-400' : 'bg-green-500 animate-pulse'}`}
+        aria-hidden
+      />
       <span>
-        STIB live at {leg.from}:{' '}
+        STIB {stale ? 'times (may be out of date)' : 'live'} at {leg.from}:{' '}
         {upcoming.map((d) => {
           const minutes = minutesUntil(d.expected, now);
           return minutes === 0 ? 'now' : `${minutes} min`;
         }).join(' · ')}
+        <span className="text-gray-400"> · Source: {STIB_ATTRIBUTION}</span>
       </span>
     </p>
   );
