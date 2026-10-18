@@ -7,12 +7,15 @@
  * - MapLibre GL with OpenFreeMap tiles (OpenStreetMap data, no API key),
  *   loaded on demand so the rest of the app does not pay for it
  * - "From" picker: the user's location or another venue
- * - Directions open Google Maps (transit), Citymapper or OSM (walking)
+ * - Routes and leave-by times for the selected venue (RoutePlanner), drawn
+ *   on the map; ?venue=slug&arrive=ISO opens straight onto them
+ * - Directions also open Google Maps (transit), Citymapper or OSM (walking)
+ * - The venue area can be saved for offline use (OfflineMapPanel)
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import type { Map as MapLibreMap, Marker } from 'maplibre-gl';
+import type { GeoJSONSource, Map as MapLibreMap, Marker } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import {
   VENUES,
@@ -24,16 +27,16 @@ import {
   type Coordinates,
   type Venue,
 } from '@/lib/venues';
-import {
-  offlineMapSupported,
-  getOfflineMapSavedAt,
-  saveMapForOffline,
-  type SaveProgress,
-} from '@/lib/offline-map';
+import type { TransitRoute } from '@/lib/transit';
 import { isOnline, setupNetworkListeners } from '@/lib/pwa';
+import RoutePlanner from './RoutePlanner';
+import OfflineMapPanel from './OfflineMapPanel';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 const HERE = 'here';
+const ROUTE_SOURCE = 'route';
+const WALK_COLOR = '#6b7280';
+const DEFAULT_LINE_COLOR = '#2563eb';
 
 type Origin = (Coordinates & { name?: string }) | undefined;
 
@@ -70,12 +73,10 @@ export default function VenueMap() {
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [mapError, setMapError] = useState(false);
-  const [mapReady, setMapReady] = useState(false);
+  const [loadedMap, setLoadedMap] = useState<MapLibreMap | null>(null);
   const [online, setOnline] = useState(true);
-  const [canSaveOffline, setCanSaveOffline] = useState(false);
-  const [savedAt, setSavedAt] = useState<string | null>(null);
-  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
-  const [saveFailed, setSaveFailed] = useState(false);
+  const [route, setRoute] = useState<TransitRoute | null>(null);
+  const arriveParam = searchParams.get('arrive') ?? undefined;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
 
@@ -108,7 +109,8 @@ export default function VenueMap() {
         });
         map.on('load', () => {
           setMapError(false);
-          setMapReady(true);
+          addRouteLayers(map);
+          setLoadedMap(map);
         });
 
         markersRef.current = VENUES.map((venue, index) => {
@@ -133,6 +135,7 @@ export default function VenueMap() {
       cancelled = true;
       mapRef.current?.remove();
       mapRef.current = null;
+      setLoadedMap(null);
       markersRef.current = [];
     };
   }, []);
@@ -166,32 +169,32 @@ export default function VenueMap() {
     };
   }, [position]);
 
-  // Online status and whether the map was already saved (browser-only APIs)
+  // Draw the chosen route and frame it
+  useEffect(() => {
+    if (!loadedMap) return;
+    const source = loadedMap.getSource<GeoJSONSource>(ROUTE_SOURCE);
+    source?.setData(routeGeoJson(route));
+    if (!route) return;
+    const points = route.legs.flatMap((leg) => leg.path);
+    if (points.length < 2) return;
+    const lons = points.map(([lon]) => lon);
+    const lats = points.map(([, lat]) => lat);
+    loadedMap.fitBounds(
+      [
+        [Math.min(...lons), Math.min(...lats)],
+        [Math.max(...lons), Math.max(...lats)],
+      ],
+      { padding: 40, maxZoom: 16 }
+    );
+  }, [loadedMap, route]);
+
+  // Online status (browser-only API)
   useEffect(() => {
     setOnline(isOnline());
-    setCanSaveOffline(offlineMapSupported());
-    setSavedAt(getOfflineMapSavedAt());
     return setupNetworkListeners(
       () => setOnline(true),
       () => setOnline(false)
     );
-  }, []);
-
-  const saveOffline = useCallback(async () => {
-    const map = mapRef.current;
-    if (!map) return;
-    setSaveFailed(false);
-    setSaveProgress({ done: 0, total: 0 });
-    try {
-      const failed = await saveMapForOffline(MAP_STYLE, map.getStyle(), setSaveProgress);
-      setSaveFailed(failed > 0);
-      setSavedAt(getOfflineMapSavedAt());
-    } catch (err) {
-      console.error('[VenueMap] Saving the map for offline use failed', err);
-      setSaveFailed(true);
-    } finally {
-      setSaveProgress(null);
-    }
   }, []);
 
   const locate = useCallback(() => {
@@ -219,6 +222,8 @@ export default function VenueMap() {
     const venue = getVenue(from);
     return venue ? { lat: venue.lat, lon: venue.lon, name: venue.name } : undefined;
   }, [from, position]);
+
+  const destination = selected && selected !== from ? getVenue(selected) : undefined;
 
   return (
     <div className="space-y-4">
@@ -262,14 +267,30 @@ export default function VenueMap() {
         {locationError && <p className="text-xs text-red-600">{locationError}</p>}
         {from === HERE && !position && !locationError && (
           <p className="text-xs text-gray-500">
-            Your location stays on your phone; it is only passed to the directions app you open.
+            Your location is rounded to about 100 m before routes are looked up, and is not stored.
           </p>
         )}
       </div>
 
       {!online && (
         <p className="bg-yellow-50 border border-yellow-200 text-yellow-800 text-sm rounded-lg p-3">
-          You are offline. Distances and venue notes still work; the directions apps need a connection.
+          You are offline. Distances, venue notes and routes you looked up recently still work;
+          the directions apps need a connection.
+        </p>
+      )}
+
+      {destination && origin && (
+        <RoutePlanner
+          key={destination.slug}
+          origin={origin}
+          destination={destination}
+          initialArriveBy={destination.slug === searchParams.get('venue') ? arriveParam : undefined}
+          onRouteChange={setRoute}
+        />
+      )}
+      {destination && !origin && (
+        <p className="text-sm text-gray-600 bg-white rounded-lg shadow-sm p-4">
+          Tap <strong>Locate me</strong> or pick a starting venue to see routes to {destination.name}.
         </p>
       )}
 
@@ -287,45 +308,41 @@ export default function VenueMap() {
         ))}
       </ul>
 
-      {canSaveOffline && (
-        <div className="bg-white rounded-lg shadow-sm p-4 space-y-2">
-          <h2 className="text-sm font-semibold text-gray-900">Offline map</h2>
-          <p className="text-xs text-gray-600">
-            Mobile data is patchy at FOSDEM. Save the map of these venues (a few MB) while you have Wi-Fi.
-          </p>
-          {saveProgress ? (
-            <div aria-live="polite">
-              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-600 transition-all"
-                  style={{ width: `${saveProgress.total ? (saveProgress.done / saveProgress.total) * 100 : 0}%` }}
-                />
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Saving… {saveProgress.done} / {saveProgress.total || '…'}
-              </p>
-            </div>
-          ) : (
-            <button
-              onClick={saveOffline}
-              disabled={!online || !mapReady}
-              className="w-full bg-gray-900 text-white text-sm font-medium py-2 rounded-lg hover:bg-gray-800 disabled:opacity-50"
-            >
-              {savedAt ? 'Update offline map' : 'Save map for offline use'}
-            </button>
-          )}
-          {savedAt && !saveProgress && (
-            <p className="text-xs text-green-700">
-              Saved {new Date(savedAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}
-            </p>
-          )}
-          {saveFailed && (
-            <p className="text-xs text-red-600">Some parts could not be downloaded. Try again on a better connection.</p>
-          )}
-        </div>
-      )}
+      <OfflineMapPanel styleUrl={MAP_STYLE} map={loadedMap} online={online} />
     </div>
   );
+}
+
+/** Line layers for the chosen route: coloured transit legs, dashed walks */
+function addRouteLayers(map: MapLibreMap) {
+  map.addSource(ROUTE_SOURCE, { type: 'geojson', data: routeGeoJson(null) });
+  map.addLayer({
+    id: 'route-transit',
+    type: 'line',
+    source: ROUTE_SOURCE,
+    filter: ['!=', ['get', 'kind'], 'walk'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': ['get', 'color'], 'line-width': 6 },
+  });
+  map.addLayer({
+    id: 'route-walk',
+    type: 'line',
+    source: ROUTE_SOURCE,
+    filter: ['==', ['get', 'kind'], 'walk'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': WALK_COLOR, 'line-width': 4, 'line-dasharray': [0.5, 2] },
+  });
+}
+
+function routeGeoJson(route: TransitRoute | null): GeoJSON.FeatureCollection {
+  return {
+    type: 'FeatureCollection',
+    features: (route?.legs ?? []).map((leg) => ({
+      type: 'Feature',
+      properties: { kind: leg.kind, color: leg.color ?? DEFAULT_LINE_COLOR },
+      geometry: { type: 'LineString', coordinates: leg.path },
+    })),
+  };
 }
 
 function VenueCard({

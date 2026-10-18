@@ -6,10 +6,12 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { getStoredCredentials } from '@/lib/nostr';
 import { useNostrPublisher } from '@/hooks/useNostrPublisher';
 import { formatRelativeDate, formatTime } from '@/lib/nostr-events';
 import { Offer } from '@/types';
+import { VILLAGE_SLUG, mapUrl } from '@/lib/venues';
 
 interface RSVPData {
   count: number;
@@ -283,6 +285,14 @@ export default function OfferDetailPage() {
                 <p className="text-sm text-gray-600">
                   📍 {offer.room}
                 </p>
+              )}
+              {offer.startTime && !eventHasStarted && (
+                <Link
+                  href={mapUrl(VILLAGE_SLUG, offer.startTime)}
+                  className="inline-block mt-2 text-sm font-medium text-blue-600 hover:underline"
+                >
+                  Get there on time →
+                </Link>
               )}
             </div>
           )}

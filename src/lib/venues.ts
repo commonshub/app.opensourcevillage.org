@@ -30,6 +30,16 @@ export interface Coordinates {
 
 export const VENUES: Venue[] = settings.venues;
 
+/** The village itself; every bookable room is inside it */
+export const VILLAGE_SLUG = 'commons-hub';
+
+/** Link to the map with routes to a venue, arriving by `arriveBy` if given */
+export function mapUrl(slug: string, arriveBy?: string): string {
+  const params = new URLSearchParams({ venue: slug });
+  if (arriveBy) params.set('arrive', arriveBy);
+  return `/map?${params}`;
+}
+
 export function getVenue(slug: string): Venue | undefined {
   return VENUES.find((venue) => venue.slug === slug);
 }

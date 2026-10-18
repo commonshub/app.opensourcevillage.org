@@ -1,260 +1,225 @@
 /**
  * Service Worker for Open Source Village PWA
  * Provides offline support, caching, and background sync
+ *
+ * Caches (each pruned by age and entry count, see CACHE_RULES):
+ * - pages:   HTML pages, network first, used when offline
+ * - static:  content-hashed /_next/static build output, cache first
+ * - runtime: other same-origin files (icons, manifest)
+ * - api:     a few API responses, used when offline
+ * - osv-map-runtime: map tiles fetched while browsing
+ * - osv-map-offline: the map area saved from /map; managed by the page
+ *   (src/lib/offline-map.ts), never pruned here
+ *
+ * Every cached response carries an `sw-cached-at` header (ms since epoch)
+ * that pruning and API freshness checks read.
  */
 
-const CACHE_VERSION = 'osv-v2';
+const CACHE_VERSION = 'osv-v3';
+const PAGES_CACHE = `${CACHE_VERSION}-pages`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
-const DYNAMIC_CACHE = `${CACHE_VERSION}-dynamic`;
+const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 const API_CACHE = `${CACHE_VERSION}-api`;
-// Map style, tiles, fonts and sprites. Not versioned with the app so a
-// deploy does not throw away a map saved for offline use.
-const MAP_CACHE = 'osv-map';
+// Not versioned with the app, so a deploy keeps the map
+const MAP_RUNTIME_CACHE = 'osv-map-runtime';
+const MAP_OFFLINE_CACHE = 'osv-map-offline';
 const MAP_HOSTS = ['tiles.openfreemap.org'];
-const MAP_CACHE_LIMIT = 3000;
+
+const CACHED_AT = 'sw-cached-at';
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+
+const CACHE_RULES = {
+  [PAGES_CACHE]: { maxEntries: 30, maxAge: 7 * DAY },
+  // Old builds' chunks are useless once nobody runs that build any more
+  [STATIC_CACHE]: { maxEntries: 300, maxAge: 30 * DAY },
+  [RUNTIME_CACHE]: { maxEntries: 60, maxAge: 30 * DAY },
+  [API_CACHE]: { maxEntries: 60, maxAge: DAY },
+  [MAP_RUNTIME_CACHE]: { maxEntries: 1500, maxAge: 30 * DAY },
+};
+
+// Tighter limits when the browser says storage is nearly full
+const PRESSURE_RULES = {
+  [PAGES_CACHE]: { maxEntries: 10 },
+  [STATIC_CACHE]: { maxEntries: 120 },
+  [MAP_RUNTIME_CACHE]: { maxEntries: 200 },
+};
+const STORAGE_PRESSURE_RATIO = 0.8;
+const CLEANUP_INTERVAL = 10 * 60 * 1000;
 
 // Pages cached on install so the app opens without a connection
 const STATIC_ASSETS = [
   '/',
   '/map',
   '/calendar',
-  '/manifest.json',
 ];
 
-// API endpoints that can be cached
-const CACHEABLE_API_PATTERNS = [
-  /\/api\/offers$/,
-  /\/api\/profile\/[\w-]+$/,
-  /\/api\/rsvp\?/,
+// API responses kept for offline use, and how old they may be when served
+const CACHEABLE_API = [
+  { pattern: /^\/api\/offers$/, maxAge: 5 * 60 * 1000 },
+  { pattern: /^\/api\/profile\/[\w-]+$/, maxAge: 5 * 60 * 1000 },
+  { pattern: /^\/api\/rsvp\?/, maxAge: 5 * 60 * 1000 },
+  // Routes go stale, but a route from this morning beats nothing offline
+  { pattern: /^\/api\/directions\?/, maxAge: 12 * HOUR },
 ];
 
-// Maximum age for cached API responses (5 minutes)
-const API_CACHE_MAX_AGE = 5 * 60 * 1000;
-
-// Maximum number of items in dynamic cache
-const DYNAMIC_CACHE_LIMIT = 50;
+const KNOWN_CACHES = [
+  PAGES_CACHE,
+  STATIC_CACHE,
+  RUNTIME_CACHE,
+  API_CACHE,
+  MAP_RUNTIME_CACHE,
+  MAP_OFFLINE_CACHE,
+];
 
 /**
- * Install event - cache static assets
+ * Store a copy of `response` stamped with the time it was cached
+ */
+async function putStamped(cacheName, request, response) {
+  const headers = new Headers(response.headers);
+  headers.set(CACHED_AT, String(Date.now()));
+  const stamped = new Response(await response.blob(), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  const cache = await caches.open(cacheName);
+  await cache.put(request, stamped);
+}
+
+function cachedAt(response) {
+  return parseInt(response.headers.get(CACHED_AT) || '0', 10);
+}
+
+/**
+ * Install event - cache the main pages
  */
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing service worker...');
-
   event.waitUntil(
-    caches.open(STATIC_CACHE)
-      .then((cache) => {
-        console.log('[SW] Caching static assets');
-        // One missing page must not stop the others from being cached
-        return Promise.allSettled(STATIC_ASSETS.map((asset) => cache.add(asset)));
+    Promise.allSettled(
+      STATIC_ASSETS.map(async (asset) => {
+        const response = await fetch(asset);
+        if (response.ok) await putStamped(PAGES_CACHE, asset, response);
       })
-      .then(() => {
-        console.log('[SW] Skip waiting');
-        return self.skipWaiting();
-      })
-      .catch((error) => {
-        console.error('[SW] Installation failed:', error);
-      })
+    ).then(() => self.skipWaiting())
   );
 });
 
 /**
- * Activate event - clean up old caches
+ * Activate event - drop caches from older versions, then prune
  */
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Activating service worker...');
-
   event.waitUntil(
     caches.keys()
-      .then((cacheNames) => {
-        return Promise.all(
+      .then((cacheNames) =>
+        Promise.all(
           cacheNames
-            .filter((cacheName) => {
-              // Delete caches that don't match current version
-              return cacheName.startsWith('osv-') &&
-                     cacheName !== MAP_CACHE &&
-                     !cacheName.startsWith(CACHE_VERSION);
+            .filter((name) => name.startsWith('osv-') && !KNOWN_CACHES.includes(name))
+            .map((name) => {
+              console.log('[SW] Deleting old cache:', name);
+              return caches.delete(name);
             })
-            .map((cacheName) => {
-              console.log('[SW] Deleting old cache:', cacheName);
-              return caches.delete(cacheName);
-            })
-        );
-      })
-      .then(() => {
-        console.log('[SW] Claiming clients');
-        return self.clients.claim();
-      })
+        )
+      )
+      .then(() => self.clients.claim())
+      .then(() => cleanupCaches())
   );
 });
 
 /**
- * Fetch event - serve from cache or network
+ * Fetch event - route each request to a caching strategy
  */
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Skip non-GET requests
-  if (request.method !== 'GET') {
+  if (request.method !== 'GET' || !url.protocol.startsWith('http')) {
     return;
   }
 
-  // Skip chrome-extension and other non-http(s) requests
-  if (!url.protocol.startsWith('http')) {
-    return;
-  }
-
-  // Map style, tiles, fonts and sprites
   if (MAP_HOSTS.includes(url.hostname)) {
     event.respondWith(handleMapRequest(request));
+  } else if (url.origin !== self.location.origin) {
+    // Leave every other third-party request to the browser
     return;
-  }
-
-  // Leave every other third-party request to the browser
-  if (url.origin !== self.location.origin) {
-    return;
-  }
-
-  // API requests - Network first, fallback to cache
-  if (url.pathname.startsWith('/api/')) {
+  } else if (url.pathname.startsWith('/api/')) {
     event.respondWith(handleApiRequest(request));
-    return;
-  }
-
-  // Pages - network first so a deploy is picked up, cache when offline
-  if (request.mode === 'navigate') {
+  } else if (request.mode === 'navigate') {
     event.respondWith(handleNavigationRequest(request));
-    return;
+  } else if (url.pathname.startsWith('/_next/static/')) {
+    event.respondWith(handleCacheFirst(request, STATIC_CACHE));
+  } else {
+    event.respondWith(handleStaleWhileRevalidate(request, RUNTIME_CACHE));
   }
 
-  // Build output is content-hashed, so a cached copy never goes stale
-  if (url.pathname.startsWith('/_next/static/')) {
-    event.respondWith(handleStaticRequest(request));
-    return;
-  }
-
-  // Other same-origin files (icons, manifest) - cache, refresh in background
-  event.respondWith(handleStaleWhileRevalidate(request, DYNAMIC_CACHE));
+  maybeCleanup(event);
 });
 
 /**
- * Handle API requests with network-first strategy
+ * API requests: network first; a few endpoints fall back to a recent
+ * cached copy when offline.
  */
 async function handleApiRequest(request) {
   const url = new URL(request.url);
+  const rule = CACHEABLE_API.find(({ pattern }) => pattern.test(url.pathname + url.search));
 
-  // Check if this API endpoint is cacheable
-  const isCacheable = CACHEABLE_API_PATTERNS.some(
-    (pattern) => pattern.test(url.pathname + url.search)
-  );
+  const fromCache = async () => {
+    if (!rule) return undefined;
+    const cached = await caches.match(request, { cacheName: API_CACHE });
+    return cached && Date.now() - cachedAt(cached) < rule.maxAge ? cached : undefined;
+  };
 
-  if (!isCacheable) {
-    // Non-cacheable API - just fetch from network
-    try {
-      return await fetch(request);
-    } catch (error) {
-      console.error('[SW] API request failed:', error);
-      return new Response(
-        JSON.stringify({ error: 'Network unavailable', offline: true }),
-        {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-    }
-  }
-
-  // Cacheable API - network first, cache fallback
   try {
     const response = await fetch(request);
-
-    // Only cache successful responses
-    if (response.ok) {
-      const cache = await caches.open(API_CACHE);
-      const clonedResponse = response.clone();
-
-      // Add timestamp to cached response
-      const responseWithTimestamp = new Response(
-        await clonedResponse.blob(),
-        {
-          status: clonedResponse.status,
-          statusText: clonedResponse.statusText,
-          headers: {
-            ...Object.fromEntries(clonedResponse.headers.entries()),
-            'X-Cache-Time': Date.now().toString(),
-          },
-        }
-      );
-
-      cache.put(request, responseWithTimestamp);
+    if (rule && response.ok) {
+      await putStamped(API_CACHE, request, response.clone());
     }
-
+    // Server down or upstream failing (502/503 during a deploy): a recent
+    // cached answer is more useful than the error
+    if (response.status >= 500) {
+      return (await fromCache()) || response;
+    }
     return response;
   } catch (error) {
-    console.log('[SW] Network failed, trying cache:', request.url);
-
-    const cachedResponse = await caches.match(request);
-
-    if (cachedResponse) {
-      const cacheTime = cachedResponse.headers.get('X-Cache-Time');
-      const age = Date.now() - parseInt(cacheTime || '0', 10);
-
-      // Check if cache is still fresh
-      if (age < API_CACHE_MAX_AGE) {
-        console.log('[SW] Serving from cache:', request.url);
-        return cachedResponse;
-      } else {
-        console.log('[SW] Cache expired:', request.url);
-      }
-    }
-
-    // No cache available
+    const cached = await fromCache();
+    if (cached) return cached;
     return new Response(
       JSON.stringify({ error: 'Network unavailable', offline: true }),
-      {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 503, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
 
 /**
- * Handle page navigations: network first, then the cached page, then the
- * cached home page.
+ * Pages: network first so a deploy is picked up, then the cached page,
+ * then the cached home page.
  */
 async function handleNavigationRequest(request) {
   try {
     const response = await fetch(request);
     if (response.ok) {
-      const cache = await caches.open(DYNAMIC_CACHE);
-      cache.put(request, response.clone());
-      limitCacheSize(DYNAMIC_CACHE, DYNAMIC_CACHE_LIMIT);
+      await putStamped(PAGES_CACHE, request, response.clone());
     }
     return response;
   } catch (error) {
-    console.log('[SW] Offline, serving cached page:', request.url);
     const cached =
-      (await caches.match(request, { ignoreSearch: true })) ||
-      (await caches.match('/'));
+      (await caches.match(request, { cacheName: PAGES_CACHE, ignoreSearch: true })) ||
+      (await caches.match('/', { cacheName: PAGES_CACHE }));
     if (cached) return cached;
     throw error;
   }
 }
 
 /**
- * Handle static requests with cache-first strategy
+ * Cache first, for URLs whose content never changes
  */
-async function handleStaticRequest(request) {
-  const cachedResponse = await caches.match(request);
-  if (cachedResponse) {
-    return cachedResponse;
-  }
+async function handleCacheFirst(request, cacheName) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
 
   const response = await fetch(request);
   if (response.ok) {
-    const cache = await caches.open(STATIC_CACHE);
-    cache.put(request, response.clone());
+    await putStamped(cacheName, request, response.clone());
   }
   return response;
 }
@@ -263,61 +228,98 @@ async function handleStaticRequest(request) {
  * Serve from cache when possible and refresh the cached copy in the background
  */
 async function handleStaleWhileRevalidate(request, cacheName) {
-  const cache = await caches.open(cacheName);
-  const cachedResponse = await cache.match(request);
+  const cached = await caches.match(request);
 
   const network = fetch(request)
-    .then((response) => {
-      if (response.ok) cache.put(request, response.clone());
+    .then(async (response) => {
+      if (response.ok) await putStamped(cacheName, request, response.clone());
       return response;
     })
     .catch((error) => {
-      if (cachedResponse) return cachedResponse;
+      if (cached) return cached;
       throw error;
     });
 
-  return cachedResponse || network;
+  return cached || network;
 }
 
 /**
  * Map requests. Style and TileJSON documents change when OpenFreeMap
  * publishes new data, so they are refreshed in the background; tiles,
- * glyphs and sprites live at versioned URLs and are served cache-first.
+ * glyphs and sprites live at versioned URLs and are served cache first.
+ * Both look in the saved offline area as well as the runtime cache.
  */
 async function handleMapRequest(request) {
   const url = new URL(request.url);
   const isDocument = !/\.(pbf|png|webp|json)$/.test(url.pathname);
-
-  if (isDocument) {
-    return handleStaleWhileRevalidate(request, MAP_CACHE);
-  }
-
-  const cache = await caches.open(MAP_CACHE);
-  const cachedResponse = await cache.match(request);
-  if (cachedResponse) return cachedResponse;
-
-  const response = await fetch(request);
-  if (response.ok) {
-    await cache.put(request, response.clone());
-    limitCacheSize(MAP_CACHE, MAP_CACHE_LIMIT);
-  }
-  return response;
+  return isDocument
+    ? handleStaleWhileRevalidate(request, MAP_RUNTIME_CACHE)
+    : handleCacheFirst(request, MAP_RUNTIME_CACHE);
 }
 
 /**
- * Limit cache size by removing oldest entries
+ * Remove entries older than `maxAge`, then the oldest beyond `maxEntries`
  */
-async function limitCacheSize(cacheName, maxSize) {
+async function pruneCache(cacheName, { maxEntries, maxAge }) {
   const cache = await caches.open(cacheName);
-  const keys = await cache.keys();
+  const requests = await cache.keys();
+  const now = Date.now();
 
-  if (keys.length > maxSize) {
-    // Delete oldest entries (first in array)
-    const deleteCount = keys.length - maxSize;
-    for (let i = 0; i < deleteCount; i++) {
-      await cache.delete(keys[i]);
+  const entries = [];
+  for (const request of requests) {
+    const response = await cache.match(request);
+    const time = response ? cachedAt(response) : 0;
+    if (maxAge && now - time > maxAge) {
+      await cache.delete(request);
+    } else {
+      entries.push({ request, time });
     }
   }
+
+  if (maxEntries && entries.length > maxEntries) {
+    entries.sort((a, b) => a.time - b.time);
+    for (const { request } of entries.slice(0, entries.length - maxEntries)) {
+      await cache.delete(request);
+    }
+  }
+}
+
+async function isUnderStoragePressure() {
+  try {
+    const { usage, quota } = await self.navigator.storage.estimate();
+    return !!quota && usage / quota > STORAGE_PRESSURE_RATIO;
+  } catch {
+    return false;
+  }
+}
+
+let cleanupRunning = null;
+let lastCleanup = 0;
+
+async function cleanupCaches() {
+  if (cleanupRunning) return cleanupRunning;
+  cleanupRunning = (async () => {
+    const pressure = await isUnderStoragePressure();
+    for (const [cacheName, rule] of Object.entries(CACHE_RULES)) {
+      const tighter = pressure ? PRESSURE_RULES[cacheName] : undefined;
+      await pruneCache(cacheName, { ...rule, ...tighter });
+    }
+    lastCleanup = Date.now();
+  })().finally(() => {
+    cleanupRunning = null;
+  });
+  return cleanupRunning;
+}
+
+/**
+ * Prune at most every CLEANUP_INTERVAL, after the response is sent
+ */
+function maybeCleanup(event) {
+  if (Date.now() - lastCleanup < CLEANUP_INTERVAL || cleanupRunning) return;
+  lastCleanup = Date.now();
+  event.waitUntil(
+    new Promise((resolve) => setTimeout(resolve, 5000)).then(cleanupCaches)
+  );
 }
 
 /**

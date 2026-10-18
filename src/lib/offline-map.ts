@@ -11,33 +11,51 @@ import type { StyleSpecification } from 'maplibre-gl';
 import { VENUES } from './venues';
 import { boundsAround, tilesForBounds, tileUrl } from './map-tiles';
 
-// Keep in sync with public/sw.js
-const MAP_CACHE = 'osv-map';
-const STATIC_CACHE = 'osv-v2-static';
-const DYNAMIC_CACHE = 'osv-v2-dynamic';
+// Cache names and the timestamp header are shared with public/sw.js;
+// src/lib/__tests__/offline-map.test.ts checks they stay in sync.
+export const MAP_OFFLINE_CACHE = 'osv-map-offline';
+export const STATIC_CACHE = 'osv-v3-static';
+export const PAGES_CACHE = 'osv-v3-pages';
+export const CACHED_AT = 'sw-cached-at';
 
 const MIN_ZOOM = 10;
 const MAX_ZOOM = 14;
 // Latin and Latin Extended: enough for Brussels street names
 const GLYPH_RANGES = ['0-255', '256-511'];
 const CONCURRENCY = 6;
-const SAVED_KEY = 'osv-map-offline-saved-at';
+const SAVED_KEY = 'osv-map-offline';
 
 export interface SaveProgress {
   done: number;
   total: number;
 }
 
+export interface OfflineMapInfo {
+  savedAt: string;
+  bytes: number;
+}
+
+export interface SaveResult {
+  failed: number;
+  bytes: number;
+}
+
 export function offlineMapSupported(): boolean {
   return typeof window !== 'undefined' && 'caches' in window;
 }
 
-export function getOfflineMapSavedAt(): string | null {
+export function getOfflineMapInfo(): OfflineMapInfo | null {
   try {
-    return localStorage.getItem(SAVED_KEY);
+    const raw = localStorage.getItem(SAVED_KEY);
+    return raw ? (JSON.parse(raw) as OfflineMapInfo) : null;
   } catch {
     return null;
   }
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Tile URL templates, plus the TileJSON documents they came from */
@@ -94,18 +112,31 @@ function appAssetUrls(): string[] {
     .filter((name) => new URL(name).pathname.startsWith('/_next/static/'));
 }
 
-async function cacheAll(
-  cache: Cache,
-  urls: string[],
-  onDone: () => void
-): Promise<number> {
+/** Fetch `url` and store it stamped like the service worker does; returns its size */
+async function fetchInto(cache: Cache, url: string): Promise<number> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${response.status} ${url}`);
+  const body = await response.blob();
+  const headers = new Headers(response.headers);
+  headers.set(CACHED_AT, String(Date.now()));
+  await cache.put(url, new Response(body, { status: response.status, headers }));
+  return body.size;
+}
+
+/**
+ * Cache every URL not cached yet. Resolves with the number of failures and
+ * the size of everything in `urls` that is now cached.
+ */
+async function cacheAll(cache: Cache, urls: string[], onDone: () => void): Promise<SaveResult> {
   let failed = 0;
+  let bytes = 0;
   let next = 0;
   async function worker() {
     while (next < urls.length) {
       const url = urls[next++];
       try {
-        if (!(await cache.match(url))) await cache.add(url);
+        const cached = await cache.match(url);
+        bytes += cached ? (await cached.clone().blob()).size : await fetchInto(cache, url);
       } catch {
         failed++;
       }
@@ -113,18 +144,28 @@ async function cacheAll(
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-  return failed;
+  return { failed, bytes };
+}
+
+/** Drop entries a previous save stored that are no longer needed */
+async function removeOtherEntries(cache: Cache, keep: string[]): Promise<void> {
+  const wanted = new Set(keep);
+  for (const request of await cache.keys()) {
+    if (!wanted.has(request.url)) await cache.delete(request);
+  }
 }
 
 /**
- * Save everything /map needs offline. Resolves with the number of
- * resources that could not be downloaded.
+ * Save everything /map needs offline.
  */
 export async function saveMapForOffline(
   styleUrl: string,
   style: StyleSpecification,
   onProgress: (progress: SaveProgress) => void
-): Promise<number> {
+): Promise<SaveResult> {
+  // Ask the browser not to evict the saved map under storage pressure
+  navigator.storage?.persist?.().catch(() => undefined);
+
   const tiles = tilesForBounds(boundsAround(VENUES), MIN_ZOOM, MAX_ZOOM);
   const { templates, tileJsonUrls } = await tileSources(style);
   const mapUrls = [
@@ -135,33 +176,55 @@ export async function saveMapForOffline(
     ...spriteUrls(style),
   ];
   const appUrls = appAssetUrls();
+  const pageUrl = new URL('/map', window.location.origin).toString();
 
   const total = mapUrls.length + appUrls.length + 1;
   let done = 0;
   const tick = () => onProgress({ done: ++done, total });
   onProgress({ done, total });
 
-  const [mapCache, staticCache, dynamicCache] = await Promise.all([
-    caches.open(MAP_CACHE),
+  const [mapCache, staticCache, pagesCache] = await Promise.all([
+    caches.open(MAP_OFFLINE_CACHE),
     caches.open(STATIC_CACHE),
-    caches.open(DYNAMIC_CACHE),
+    caches.open(PAGES_CACHE),
   ]);
 
-  let failed = await cacheAll(mapCache, mapUrls, tick);
-  failed += await cacheAll(staticCache, appUrls, tick);
+  // The style and TileJSON may have changed since the last save; tiles live
+  // at versioned URLs, so a new data release means new URLs anyway.
+  await Promise.all([styleUrl, ...tileJsonUrls].map((url) => mapCache.delete(url)));
+
+  const map = await cacheAll(mapCache, mapUrls, tick);
+  const app = await cacheAll(staticCache, appUrls, tick);
+  let pageFailed = 0;
   try {
-    await dynamicCache.add('/map');
+    await fetchInto(pagesCache, pageUrl);
   } catch {
-    failed++;
+    pageFailed = 1;
   }
   tick();
 
-  if (failed === 0) {
+  const result = { failed: map.failed + app.failed + pageFailed, bytes: map.bytes + app.bytes };
+
+  if (map.failed === 0) {
+    // Only prune after a complete save, so a failed update never leaves
+    // less offline than there was before
+    await removeOtherEntries(mapCache, mapUrls);
     try {
-      localStorage.setItem(SAVED_KEY, new Date().toISOString());
+      const info: OfflineMapInfo = { savedAt: new Date().toISOString(), bytes: map.bytes };
+      localStorage.setItem(SAVED_KEY, JSON.stringify(info));
     } catch {
       // Private mode: the map is still cached, we just cannot remember when
     }
   }
-  return failed;
+  return result;
+}
+
+/** Delete the saved map area */
+export async function removeOfflineMap(): Promise<void> {
+  await caches.delete(MAP_OFFLINE_CACHE);
+  try {
+    localStorage.removeItem(SAVED_KEY);
+  } catch {
+    // Nothing remembered
+  }
 }

@@ -9,6 +9,8 @@ import {
   walkingMinutes,
   formatDistance,
   directionsLinks,
+  mapUrl,
+  VILLAGE_SLUG,
 } from '../venues';
 
 describe('VENUES', () => {
@@ -67,5 +69,17 @@ describe('directionsLinks', () => {
     expect(new URL(links.walking).searchParams.get('route')).toBe(
       `${hub.lat},${hub.lon};${fosdem.lat},${fosdem.lon}`
     );
+  });
+});
+
+describe('mapUrl', () => {
+  it('links to the map with an arrival time', () => {
+    expect(mapUrl(VILLAGE_SLUG, '2027-01-28T09:00:00.000Z')).toBe(
+      '/map?venue=commons-hub&arrive=2027-01-28T09%3A00%3A00.000Z'
+    );
+  });
+
+  it('names a venue that exists', () => {
+    expect(VENUES.some((venue) => venue.slug === VILLAGE_SLUG)).toBe(true);
   });
 });
