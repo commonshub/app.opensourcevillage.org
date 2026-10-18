@@ -8,6 +8,8 @@
  * - Each option shows when to leave, a live countdown, the lines with
  *   their colours and real-time delays
  * - The chosen route is reported to the parent to draw on the map
+ * - STIB-MIVB legs show STIB's own live waiting times at the boarding stop
+ *   (when the server has a STIB_API_KEY)
  * - Offline, the service worker serves the last routes fetched (up to 12 h)
  */
 
@@ -15,6 +17,7 @@ import { useEffect, useMemo, useState } from 'react';
 import settings from '../../settings.json';
 import type { Coordinates, Venue } from '@/lib/venues';
 import { leaveLabel, minutesUntil, type RouteLeg, type TransitRoute } from '@/lib/transit';
+import { isStibAgency, stibStopId, type StibDeparture } from '@/lib/stib';
 
 interface DirectionsResponse {
   routes: TransitRoute[];
@@ -90,6 +93,56 @@ function Delay({ minutes, realTime }: { minutes: number; realTime: boolean }) {
   if (minutes > 0) return <span className="text-red-600 font-medium">+{minutes} min</span>;
   if (minutes < 0) return <span className="text-green-700">{minutes} min</span>;
   return <span className="text-green-700">on time</span>;
+}
+
+const STIB_REFRESH = 30000;
+
+/** STIB's live "next 71 in 3 min, 11 min" at the stop a leg boards */
+function StibLive({ leg, now }: { leg: RouteLeg; now: number }) {
+  const stop = isStibAgency(leg.agency) ? stibStopId(leg.fromStopId) : null;
+  const [departures, setDepartures] = useState<StibDeparture[] | null>(null);
+
+  useEffect(() => {
+    if (!stop || !leg.line) return;
+    let stopped = false;
+    const params = new URLSearchParams({ stop, line: leg.line });
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/stib/departures?${params}`);
+        if (!res.ok) {
+          // Not configured: stop asking; offline or errors: try again later
+          const body = await res.json().catch(() => ({}));
+          if (body.disabled) stopped = true;
+          setDepartures(null);
+          return;
+        }
+        setDepartures((await res.json()).departures);
+      } catch {
+        setDepartures(null);
+      }
+    };
+    load();
+    const timer = setInterval(() => {
+      if (!stopped && document.visibilityState === 'visible') load();
+    }, STIB_REFRESH);
+    return () => clearInterval(timer);
+  }, [stop, leg.line]);
+
+  const upcoming = (departures ?? []).filter((d) => minutesUntil(d.expected, now) >= 0).slice(0, 3);
+  if (!upcoming.length) return null;
+
+  return (
+    <p className="text-xs text-gray-700 mt-0.5 flex items-center gap-1.5">
+      <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" aria-hidden />
+      <span>
+        STIB live at {leg.from}:{' '}
+        {upcoming.map((d) => {
+          const minutes = minutesUntil(d.expected, now);
+          return minutes === 0 ? 'now' : `${minutes} min`;
+        }).join(' · ')}
+      </span>
+    </p>
+  );
 }
 
 export default function RoutePlanner({
@@ -262,6 +315,7 @@ export default function RoutePlanner({
                           </span>
                         )}
                       </div>
+                      {leg.kind !== 'walk' && <StibLive leg={leg} now={now} />}
                       <p className="text-xs text-gray-600">
                         {leg.kind === 'walk'
                           ? `Walk ${leg.durationMinutes} min to ${leg.to}`

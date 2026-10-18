@@ -53,12 +53,13 @@ function walk(start: string, end: string) {
 function bus71(start: string, end: string, scheduledStart: string, extra = {}) {
   return {
     mode: 'BUS',
-    from: place('Gare Centrale'),
+    from: { ...place('Gare Centrale'), stopId: 'be-stib_1059F' },
     to: place('ULB'),
     duration: (Date.parse(end) - Date.parse(start)) / 1000,
     startTime: start,
     endTime: end,
     scheduledStartTime: scheduledStart,
+    agencyName: 'STIB-MIVB',
     realTime: true,
     routeShortName: '71',
     headsign: 'DELTA',
@@ -110,6 +111,8 @@ describe('parsePlan', () => {
       realTime: true,
       stops: 3,
       durationMinutes: 21,
+      agency: 'STIB-MIVB',
+      fromStopId: 'be-stib_1059F',
     });
     expect(bus.path[0][1]).toBeCloseTo(50.845, 5);
     expect(route.legs[0].line).toBeUndefined();

@@ -29,6 +29,10 @@ export interface RouteLeg {
   textColor?: string;
   /** Number of stops between boarding and alighting */
   stops?: number;
+  /** Operator, e.g. "STIB-MIVB" */
+  agency?: string;
+  /** Route planner's id for the boarding stop */
+  fromStopId?: string;
   /** [lon, lat] pairs */
   path: [number, number][];
 }
@@ -48,6 +52,7 @@ interface MotisPlace {
   name: string;
   lat: number;
   lon: number;
+  stopId?: string;
 }
 
 interface MotisLeg {
@@ -65,6 +70,7 @@ interface MotisLeg {
   displayName?: string;
   routeColor?: string;
   routeTextColor?: string;
+  agencyName?: string;
   intermediateStops?: unknown[];
   legGeometry?: { points: string; precision: number };
 }
@@ -162,6 +168,8 @@ function parseLeg(leg: MotisLeg): RouteLeg {
     color: cssColor(leg.routeColor),
     textColor: cssColor(leg.routeTextColor),
     stops: leg.intermediateStops ? leg.intermediateStops.length : undefined,
+    agency: kind === 'walk' ? undefined : leg.agencyName,
+    fromStopId: kind === 'walk' ? undefined : leg.from.stopId,
     path: path.length ? path : [[leg.from.lon, leg.from.lat], [leg.to.lon, leg.to.lat]],
   };
 }
