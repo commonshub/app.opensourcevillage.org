@@ -31,6 +31,7 @@
     "googleapis": "^144.0.0",
     "html5-qrcode": "^2.3.8",
     "lucide-react": "^0.563.0",
+    "maplibre-gl": "^5.24.0",
     "next": "^16.1.4",
     "nostr-tools": "^2.7.0",
     "qrcode.react": "^4.2.0",
