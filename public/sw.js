@@ -3,19 +3,22 @@
  * Provides offline support, caching, and background sync
  */
 
-const CACHE_VERSION = 'osv-v1';
+const CACHE_VERSION = 'osv-v2';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const DYNAMIC_CACHE = `${CACHE_VERSION}-dynamic`;
 const API_CACHE = `${CACHE_VERSION}-api`;
+// Map style, tiles, fonts and sprites. Not versioned with the app so a
+// deploy does not throw away a map saved for offline use.
+const MAP_CACHE = 'osv-map';
+const MAP_HOSTS = ['tiles.openfreemap.org'];
+const MAP_CACHE_LIMIT = 3000;
 
-// Files to cache immediately on install
+// Pages cached on install so the app opens without a connection
 const STATIC_ASSETS = [
   '/',
+  '/map',
   '/calendar',
-  '/marketplace',
-  '/badge',
   '/manifest.json',
-  // Add more static assets as needed
 ];
 
 // API endpoints that can be cached
@@ -41,7 +44,8 @@ self.addEventListener('install', (event) => {
     caches.open(STATIC_CACHE)
       .then((cache) => {
         console.log('[SW] Caching static assets');
-        return cache.addAll(STATIC_ASSETS);
+        // One missing page must not stop the others from being cached
+        return Promise.allSettled(STATIC_ASSETS.map((asset) => cache.add(asset)));
       })
       .then(() => {
         console.log('[SW] Skip waiting');
@@ -67,6 +71,7 @@ self.addEventListener('activate', (event) => {
             .filter((cacheName) => {
               // Delete caches that don't match current version
               return cacheName.startsWith('osv-') &&
+                     cacheName !== MAP_CACHE &&
                      !cacheName.startsWith(CACHE_VERSION);
             })
             .map((cacheName) => {
@@ -99,14 +104,37 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Map style, tiles, fonts and sprites
+  if (MAP_HOSTS.includes(url.hostname)) {
+    event.respondWith(handleMapRequest(request));
+    return;
+  }
+
+  // Leave every other third-party request to the browser
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
   // API requests - Network first, fallback to cache
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(handleApiRequest(request));
     return;
   }
 
-  // Static assets - Cache first, fallback to network
-  event.respondWith(handleStaticRequest(request));
+  // Pages - network first so a deploy is picked up, cache when offline
+  if (request.mode === 'navigate') {
+    event.respondWith(handleNavigationRequest(request));
+    return;
+  }
+
+  // Build output is content-hashed, so a cached copy never goes stale
+  if (url.pathname.startsWith('/_next/static/')) {
+    event.respondWith(handleStaticRequest(request));
+    return;
+  }
+
+  // Other same-origin files (icons, manifest) - cache, refresh in background
+  event.respondWith(handleStaleWhileRevalidate(request, DYNAMIC_CACHE));
 });
 
 /**
@@ -192,44 +220,88 @@ async function handleApiRequest(request) {
 }
 
 /**
- * Handle static requests with cache-first strategy
+ * Handle page navigations: network first, then the cached page, then the
+ * cached home page.
  */
-async function handleStaticRequest(request) {
-  // Try cache first
-  const cachedResponse = await caches.match(request);
-
-  if (cachedResponse) {
-    console.log('[SW] Serving from cache:', request.url);
-    return cachedResponse;
-  }
-
-  // Not in cache, fetch from network
+async function handleNavigationRequest(request) {
   try {
     const response = await fetch(request);
-
-    // Cache successful responses
     if (response.ok) {
       const cache = await caches.open(DYNAMIC_CACHE);
       cache.put(request, response.clone());
-
-      // Limit dynamic cache size
       limitCacheSize(DYNAMIC_CACHE, DYNAMIC_CACHE_LIMIT);
     }
-
     return response;
   } catch (error) {
-    console.error('[SW] Network request failed:', request.url, error);
-
-    // Return offline page for navigation requests
-    if (request.mode === 'navigate') {
-      const offlineResponse = await caches.match('/');
-      if (offlineResponse) {
-        return offlineResponse;
-      }
-    }
-
+    console.log('[SW] Offline, serving cached page:', request.url);
+    const cached =
+      (await caches.match(request, { ignoreSearch: true })) ||
+      (await caches.match('/'));
+    if (cached) return cached;
     throw error;
   }
+}
+
+/**
+ * Handle static requests with cache-first strategy
+ */
+async function handleStaticRequest(request) {
+  const cachedResponse = await caches.match(request);
+  if (cachedResponse) {
+    return cachedResponse;
+  }
+
+  const response = await fetch(request);
+  if (response.ok) {
+    const cache = await caches.open(STATIC_CACHE);
+    cache.put(request, response.clone());
+  }
+  return response;
+}
+
+/**
+ * Serve from cache when possible and refresh the cached copy in the background
+ */
+async function handleStaleWhileRevalidate(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  const cachedResponse = await cache.match(request);
+
+  const network = fetch(request)
+    .then((response) => {
+      if (response.ok) cache.put(request, response.clone());
+      return response;
+    })
+    .catch((error) => {
+      if (cachedResponse) return cachedResponse;
+      throw error;
+    });
+
+  return cachedResponse || network;
+}
+
+/**
+ * Map requests. Style and TileJSON documents change when OpenFreeMap
+ * publishes new data, so they are refreshed in the background; tiles,
+ * glyphs and sprites live at versioned URLs and are served cache-first.
+ */
+async function handleMapRequest(request) {
+  const url = new URL(request.url);
+  const isDocument = !/\.(pbf|png|webp|json)$/.test(url.pathname);
+
+  if (isDocument) {
+    return handleStaleWhileRevalidate(request, MAP_CACHE);
+  }
+
+  const cache = await caches.open(MAP_CACHE);
+  const cachedResponse = await cache.match(request);
+  if (cachedResponse) return cachedResponse;
+
+  const response = await fetch(request);
+  if (response.ok) {
+    await cache.put(request, response.clone());
+    limitCacheSize(MAP_CACHE, MAP_CACHE_LIMIT);
+  }
+  return response;
 }
 
 /**

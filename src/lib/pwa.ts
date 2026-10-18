@@ -39,10 +39,12 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
       }
     });
 
-    // Handle controller change (new service worker activated)
+    // Handle controller change (new service worker activated). The first
+    // install also takes control of the page; that needs no reload.
     let refreshing = false;
+    const hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (!refreshing) {
+      if (hadController && !refreshing) {
         refreshing = true;
         console.log('[PWA] Controller changed, reloading...');
         window.location.reload();

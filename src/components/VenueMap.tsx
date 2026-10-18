@@ -24,6 +24,13 @@ import {
   type Coordinates,
   type Venue,
 } from '@/lib/venues';
+import {
+  offlineMapSupported,
+  getOfflineMapSavedAt,
+  saveMapForOffline,
+  type SaveProgress,
+} from '@/lib/offline-map';
+import { isOnline, setupNetworkListeners } from '@/lib/pwa';
 
 const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
 const HERE = 'here';
@@ -63,6 +70,12 @@ export default function VenueMap() {
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [mapError, setMapError] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
+  const [online, setOnline] = useState(true);
+  const [canSaveOffline, setCanSaveOffline] = useState(false);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
 
@@ -93,7 +106,10 @@ export default function VenueMap() {
           console.warn('[VenueMap] map error', e.error);
           if (!map.loaded() && !cancelled) setMapError(true);
         });
-        map.on('load', () => setMapError(false));
+        map.on('load', () => {
+          setMapError(false);
+          setMapReady(true);
+        });
 
         markersRef.current = VENUES.map((venue, index) => {
           const el = markerElement(index);
@@ -149,6 +165,34 @@ export default function VenueMap() {
       marker?.remove();
     };
   }, [position]);
+
+  // Online status and whether the map was already saved (browser-only APIs)
+  useEffect(() => {
+    setOnline(isOnline());
+    setCanSaveOffline(offlineMapSupported());
+    setSavedAt(getOfflineMapSavedAt());
+    return setupNetworkListeners(
+      () => setOnline(true),
+      () => setOnline(false)
+    );
+  }, []);
+
+  const saveOffline = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) return;
+    setSaveFailed(false);
+    setSaveProgress({ done: 0, total: 0 });
+    try {
+      const failed = await saveMapForOffline(MAP_STYLE, map.getStyle(), setSaveProgress);
+      setSaveFailed(failed > 0);
+      setSavedAt(getOfflineMapSavedAt());
+    } catch (err) {
+      console.error('[VenueMap] Saving the map for offline use failed', err);
+      setSaveFailed(true);
+    } finally {
+      setSaveProgress(null);
+    }
+  }, []);
 
   const locate = useCallback(() => {
     if (!navigator.geolocation) {
@@ -223,6 +267,12 @@ export default function VenueMap() {
         )}
       </div>
 
+      {!online && (
+        <p className="bg-yellow-50 border border-yellow-200 text-yellow-800 text-sm rounded-lg p-3">
+          You are offline. Distances and venue notes still work; the directions apps need a connection.
+        </p>
+      )}
+
       <ul className="space-y-3">
         {VENUES.map((venue, index) => (
           <VenueCard
@@ -236,6 +286,44 @@ export default function VenueMap() {
           />
         ))}
       </ul>
+
+      {canSaveOffline && (
+        <div className="bg-white rounded-lg shadow-sm p-4 space-y-2">
+          <h2 className="text-sm font-semibold text-gray-900">Offline map</h2>
+          <p className="text-xs text-gray-600">
+            Mobile data is patchy at FOSDEM. Save the map of these venues (a few MB) while you have Wi-Fi.
+          </p>
+          {saveProgress ? (
+            <div aria-live="polite">
+              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-600 transition-all"
+                  style={{ width: `${saveProgress.total ? (saveProgress.done / saveProgress.total) * 100 : 0}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Saving… {saveProgress.done} / {saveProgress.total || '…'}
+              </p>
+            </div>
+          ) : (
+            <button
+              onClick={saveOffline}
+              disabled={!online || !mapReady}
+              className="w-full bg-gray-900 text-white text-sm font-medium py-2 rounded-lg hover:bg-gray-800 disabled:opacity-50"
+            >
+              {savedAt ? 'Update offline map' : 'Save map for offline use'}
+            </button>
+          )}
+          {savedAt && !saveProgress && (
+            <p className="text-xs text-green-700">
+              Saved {new Date(savedAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}
+            </p>
+          )}
+          {saveFailed && (
+            <p className="text-xs text-red-600">Some parts could not be downloaded. Try again on a better connection.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

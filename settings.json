@@ -161,7 +161,8 @@
       "address": "Avenue Franklin Roosevelt 50, 1050 Brussels",
       "lat": 50.8127,
       "lon": 4.3816,
-      "url": "https://fosdem.org"
+      "url": "https://fosdem.org",
+      "note": "From the village: bus 71 from Gare Centrale to the ULB stop, about 20 minutes."
     },
     {
       "slug": "marriott-grand-place",

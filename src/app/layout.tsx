@@ -6,6 +6,8 @@ import DebugInfo from "@/components/DebugInfo";
 import TopBar from "@/components/TopBar";
 import Footer from "@/components/Footer";
 import FloatingActionMenu from "@/components/FloatingActionMenu";
+import OfflineIndicator from "@/components/OfflineIndicator";
+import ServiceWorkerRegistration from "@/components/ServiceWorkerRegistration";
 import { getRelayUrls, getServerNpub } from "@/lib/nostr-server";
 import { EVENT } from "@/lib/event";
 
@@ -39,6 +41,8 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased bg-gray-50 min-h-screen flex flex-col">
+        <ServiceWorkerRegistration />
+        <OfflineIndicator />
         <WalletSetup />
         <NostrStatus />
         <TopBar />
